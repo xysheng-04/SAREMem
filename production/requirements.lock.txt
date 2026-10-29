@@ -1,0 +1,24 @@
+# Verified local Python 3.12 environment; Linux installation is target-environment validation.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.10.19
+click==8.5.0
+distro==1.9.0
+fastapi==0.161.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+jiter==0.17.0
+numpy==2.5.4
+openai==2.54.0
+opentelemetry-api==1.45.1
+pydantic==2.14.1
+pydantic-core==2.50.1
+sniffio==1.3.1
+starlette==1.9.0
+tqdm==4.70.1
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+uvicorn==0.54.0
