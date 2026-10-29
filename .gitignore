@@ -1,0 +1,30 @@
+# Instance credentials, state and evaluation artifacts
+/config/
+/state/
+/testing/outputs/
+/.env
+/.env.*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.sqlite-*
+*.db
+*.pem
+*.key
+
+# Local runtimes, caches and operational files
+/.venv*/
+/envs/
+/.cache/
+/cache/
+/tmp/
+/logs/
+/outputs/
+/backups/
+/packages/
+/receipts/
+/incoming/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.DS_Store
