@@ -24,7 +24,26 @@ def configured_settings():
         url = urlparse(os.environ[name])
         if url.scheme not in {'http','https'} or not url.hostname or url.username or url.password or url.query:
             raise ValueError('invalid provider URL')
+    mode = os.environ.get('AML_SEED_RETRIEVAL_MODE', 'default')
+    if mode not in {'default','legacy'}:
+        raise ValueError('invalid seed retrieval mode')
+    if mode == 'legacy' and not (Path(__file__).parent/'aml_api/legacy_seed/source.py').is_file():
+        raise ValueError('legacy seed module unavailable')
+    reorder_mode = os.environ.get('AML_SIMPLE_REORDER_MODE', 'stable_groups')
+    if reorder_mode not in {'bounded','stable_groups'}:
+        raise ValueError('invalid simple reorder mode')
+    if not 1 <= int(os.environ.get('AML_SIMPLE_ASSESS_POOL', '40')) <= 80:
+        raise ValueError('simple assessment pool must be within 1..80')
+    if reorder_mode == 'stable_groups' and not (Path(__file__).parent/'aml_api/simple/reordering.py').is_file():
+        raise ValueError('stable grouping module unavailable')
+    neighbor_mode = os.environ.get('AML_SIMPLE_NEIGHBOR_MODE', 'session')
+    if neighbor_mode not in {'off','session'}:
+        raise ValueError('invalid simple neighbor mode')
+    if neighbor_mode == 'session' and not (Path(__file__).parent/'aml_api/simple/neighbor_fill.py').is_file():
+        raise ValueError('neighbor fill module unavailable')
     settings = Settings.from_env()
+    if mode == 'legacy' and not 1 <= settings.retrieve_pool <= 80:
+        raise ValueError('legacy seed pool must be within 1..80')
     if not settings.storage_path.is_file():
         raise ValueError('initialize a new dedicated database explicitly before starting')
     return settings
@@ -56,8 +75,9 @@ def main():
     except Exception:
         raise SystemExit('Competition startup rejected: check required configuration and database.') from None
     import uvicorn
+    from aml_api.production.http_transport import DeadlineH11Protocol
     uvicorn.run(app, host=args.host, port=args.port, access_log=False, log_config=None,
-                log_level='critical', server_header=False, workers=1)
+                log_level='critical', server_header=False, workers=1,http=DeadlineH11Protocol)
 
 
 if __name__ == '__main__':

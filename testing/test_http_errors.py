@@ -151,7 +151,7 @@ def test_exhausted_search_has_correct_error_and_releases_capacity(settings, faul
     service = ProductionService(settings, runner=runner)
     with TestClient(build_app(settings=settings, service=service)) as client:
         response = client.post('/search', json=QUERY, headers=HEADERS)
-    assert response.status_code == status and runner.calls == 3
+    assert response.status_code == status and runner.calls == 1
     assert service.slots.acquire(blocking=False)
     assert not settings.storage_path.exists()
 

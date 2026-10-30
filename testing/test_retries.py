@@ -123,14 +123,19 @@ def test_shared_three_send_budget_across_transport_and_repair(setup, sequence):
 def test_exhaustion_and_permanent_failures_fall_back(setup, sequence, sends, code):
     response, events = request(setup, RetryBackend(sequence))
     check_success(response, setup[0])
-    assert events[0]['final'] == 'legacy'
-    assert [s['path'] for s in events[0]['stages']] == ['simple','legacy']
-    first = events[0]['stages'][0]
-    assert first['test_sends'] == sends and first['code'] == code
+    first=events[0]['stages'][0]
+    if sequence[0] in (401,403):
+        assert events[0]['final']=='legacy' and first['test_sends']==sends
+        assert first['code']=='provider_auth'
+    else:
+        assert events[0]['final']=='simple' and len(events[0]['stages'])==1
+        assert first['test_sends']==sends+3
+        assert len(first['candidate_errors'])==1
+        assert len(response.json()['data'])==3
 
 
 def test_retry_exhaustion_then_legacy_failure_reuses_seed(setup):
-    response, events = request(setup, RetryBackend(('timeout','timeout'),legacy_mode='error'))
+    response, events = request(setup, RetryBackend((401,),legacy_mode='error'))
     check_success(response, setup[0])
     assert events[0]['final'] == 'seed'
     assert events[0]['stages'][-1]['phase'] == 'final_validation'

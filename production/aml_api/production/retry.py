@@ -69,7 +69,7 @@ class AttemptBudget:
             except Exception as exc:
                 controls.check_time()
                 if not transient(exc):
-                    raise SearchFault('provider') from None
+                    raise SearchFault('provider_auth' if isinstance(exc,APIStatusError) and exc.status_code in {401,403} else 'provider') from None
                 if self.transport_retries >= 1 or self.sends >= 3:
                     raise SearchFault('provider_retry_exhausted') from None
                 delay = retry_delay(exc)

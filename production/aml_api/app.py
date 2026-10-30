@@ -22,7 +22,7 @@ def create_app(settings: Settings | None = None, service=None, *, production: bo
     app = FastAPI(title="SAREMem AML API", version="1.0.0")
     if production:
         from .production.request_clock import SearchRequestClock
-        app.add_middleware(SearchRequestClock)
+        app.add_middleware(SearchRequestClock, policy=getattr(service, 'policy', None))
 
     def authenticate(authorization: str | None, x_api_key: str | None) -> None:
         expected = settings.memory_system_key

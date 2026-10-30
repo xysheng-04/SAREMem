@@ -18,14 +18,28 @@ def quiet():
 
 
 def execute(stage, settings, request, policy, deadline, checkpoint, publish, stats):
+    if stage in {'simple', 'legacy'} and os.environ.get('AML_SEARCH_IMAGE_MODE', 'auto') != 'off':
+        from ..search_images import scope
+        with scope(deadline) as images:
+            try:
+                return _execute(stage, settings, request, policy, deadline, checkpoint, publish, stats)
+            finally:
+                stats['image_policy'] = images.policy
+                stats['image_policy_binding'] = images.binding
+                stats['image_derivatives'] = images.records
+                stats['provider_sends'] = images.sends
+                stats['provider_usage'] = images.usage
+    return _execute(stage, settings, request, policy, deadline, checkpoint, publish, stats)
+
+def _execute(stage, settings, request, policy, deadline, checkpoint, publish, stats):
     from .runtime import simple, legacy
     from .validation import seed_response
     if stage == 'simple':
         return simple(settings, request, policy, deadline, publish, stats)
     if stage == 'legacy':
-        return legacy(settings, request, policy, deadline, publish, stats)
+        return legacy(settings, request, policy, deadline, publish, stats, checkpoint=checkpoint)
     if stage == 'seed':
-        stats['phase'] = 'seed_reuse' if checkpoint is not None else 'seed_lexical'
+        stats['phase'] = 'seed_reuse' if checkpoint is not None else 'seed_missing'
         return seed_response(settings, request, policy, checkpoint, stats)
     raise SearchFault('internal')
 
@@ -68,6 +82,10 @@ class StageRunner:
         self.backend = backend
 
     def run(self, stage, settings, request, policy, deadline, checkpoint, publish):
+        from .request_clock import request_cancelled
+        cancelled = request_cancelled.get()
+        if cancelled is not None and cancelled.is_set():
+            raise SearchFault('deadline')
         parent, child = socket.socketpair()
         proc = multiprocessing.get_context('spawn').Process(
             target=worker, args=(child, stage, settings, request, policy, deadline, checkpoint, self.backend),
@@ -80,6 +98,8 @@ class StageRunner:
             child.close()
             parent.setblocking(False)
             while True:
+                if cancelled is not None and cancelled.is_set():
+                    raise SearchFault('deadline')
                 remaining = deadline-time.monotonic()
                 if remaining <= 0:
                     raise SearchFault('deadline')

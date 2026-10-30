@@ -37,9 +37,10 @@ def main():
     quiet()
     app = build_app(settings=settings,service=ProductionService(settings,diagnostics=record))
     import uvicorn
+    from aml_api.production.http_transport import DeadlineH11Protocol
     uvicorn.run(app, host=os.environ.get('AML_BIND_HOST','127.0.0.1'),
                 port=int(os.environ.get('AML_PORT','8001')), access_log=False,
-                log_config=None, log_level='critical', server_header=False)
+                log_config=None, log_level='critical', server_header=False,http=DeadlineH11Protocol)
 
 
 if __name__ == '__main__':

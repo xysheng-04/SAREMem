@@ -55,7 +55,7 @@ def seed_checkpoint(request, snapshot, view):
         if content_digest(view.contents([hit.memory_id])[hit.memory_id]) != hit.content_digest:
             raise SearchFault('source_integrity', terminal=True)
     return {'request': digest(request.model_dump(mode='json')),
-            'hits': [{'id': h.memory_id, 'hash': h.content_digest} for h in snapshot.hits]}
+            'hits': [{'id': h.memory_id, 'hash': h.content_digest, 'score': h.score} for h in snapshot.hits]}
 
 
 def finalize(settings, request, policy, value, path, stats):
@@ -129,38 +129,33 @@ def seed_response(settings, request, policy, checkpoint, stats):
     from ..media import plain_text
     from ..retrieval import lexical_rank
     with reader(settings.storage_path) as db:
-        if checkpoint is not None:
-            if checkpoint.get('request') != digest(request.model_dump(mode='json')):
-                raise SearchFault('scope_denied', terminal=True)
-            hits = checkpoint['hits']
-            stats['seed_existing'] = True
-        else:
-            # Lexical-only fallback: no planner, image caption, embedder or remote provider.
-            rows, size = [], 0
-            for r in db.execute('SELECT v.memory_id,v.text FROM views v JOIN memories m '
-                                'ON m.memory_id=v.memory_id WHERE m.user_id=? ORDER BY m.seq,v.view_id',
-                                (request.user_id,)):
-                size += len(r['text'].encode())
-                if size > policy.source_bytes or len(rows) >= 100000:
-                    raise SearchFault('capacity')
-                rows.append(dict(r))
-            ids = lexical_rank(plain_text(request.query), rows, 80, use_bm25=settings.use_bm25,
-                               bm25_k1=settings.bm25_k1, bm25_b=settings.bm25_b)
-            hits = [{'id': mid} for mid in ids]
+        if checkpoint is None:
+            raise SearchFault('seed_unavailable')
+        if checkpoint.get('request') != digest(request.model_dump(mode='json')):
+            raise SearchFault('scope_denied',terminal=True)
+        hits=checkpoint.get('hits')
+        if not isinstance(hits,list) or len(hits)>80:
+            raise SearchFault('seed_integrity',terminal=True)
+        ids=[h.get('id') for h in hits if isinstance(h,dict)]
+        if len(ids)!=len(hits) or any(not isinstance(mid,str) or not mid for mid in ids) or len(ids)!=len(set(ids)):
+            raise SearchFault('seed_integrity',terminal=True)
+        stats['seed_existing']=True
         stats['candidate_count'] = len(hits)
         candidates = []
         read_bytes = 0
         for hit in hits:
             raw = original(db, request.user_id, hit['id'], policy.source_bytes)
             if raw is None:
-                stats['dropped'] += 1
-                continue
+                raise SearchFault('source_integrity',terminal=True)
             content, created = raw
             read_bytes += len(json.dumps(content,ensure_ascii=False).encode())
             if read_bytes > policy.source_bytes:
                 raise SearchFault('capacity')
-            if 'hash' in hit and content_digest(content) != hit['hash']:
+            if content_digest(content) != hit.get('hash'):
                 raise SearchFault('source_integrity', terminal=True)
+            score=hit.get('score')
+            if type(score) not in (float,int) or not math.isfinite(score) or (candidates and score>candidates[-1]['score']):
+                raise SearchFault('seed_integrity',terminal=True)
             candidates.append({'id': hit['id'], 'content': content,
-                               'score': 1.0/(len(candidates)+1), 'created_at': created})
+                               'score': score, 'created_at': created})
         return {'data': candidates}

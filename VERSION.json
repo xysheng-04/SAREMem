@@ -1,6 +1,7 @@
 {
   "version": "saremem",
-  "status": "http-error-hardened-candidate",
+  "status": "unified-http-deadline-atomic-add",
+  "operational_control": "unified-http-deadline-parent-atomic-add-v1",
   "http_error_contract": "safe-field-validation-unicode-auth-capacity429-deadline504",
   "source_execution_identity": "158abaa6fcb993c9a5ccb9e8d06bcc4db5bb7121e6882dad59b687aeca0c3aec",
   "source_identity_file_count": 193,
@@ -8,7 +9,7 @@
   "target_public_cloud_acceptance": "pending",
   "assessment_retry": "one-transport-one-protocol-three-sends-shared-stage-deadline",
   "project": "SAREMem",
-  "project_expansion": "Seed-Aware Reordering of Evidence for Multimodal Memory",
+  "project_expansion": "Seed-Anchored Reranking and Expansion for Multimodal Agent Memory",
   "upstream_candidate_identity": "6452e15e5f39d7bf9975feb717be186bc11c8631dfa6338a5c1e103d9329828e",
   "source_normalization": "two module docstrings only; executable AST unchanged"
 }

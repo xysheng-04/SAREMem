@@ -51,7 +51,8 @@ def test_invalid_media_skipped_without_changing_original(setup):
         mid = db.execute('SELECT memory_id FROM memories WHERE user_id=? ORDER BY seq LIMIT 1',('test-a',)).fetchone()[0]
         db.execute('UPDATE memories SET content_json=? WHERE memory_id=?',
                    (json.dumps([{'type':'image_url','image_url':{'url':'data:image/png;base64,!!!'}}]),mid))
-    r,e = request(setup,FaultBackend(simple_mode='error',legacy_mode='raw',raw={'data':raw_rows(s)}))
+    db.close()  # Finish fixture WAL checkpoint before the guarded source snapshot.
+    r,e = request(setup,FaultBackend(simple_mode='after_seed_error',legacy_mode='raw',raw={'data':raw_rows(s)}))
     check_success(r,s)
     assert len(r.json()['data'])==3
     assert e[0]['stages'][-1]['media_filtered']
@@ -68,7 +69,8 @@ def test_real_media_limit_and_backfill_http(setup):
         for mid in ids[:4]:
             db.execute('UPDATE memories SET content_json=? WHERE memory_id=?',
                        (json.dumps([{'type':'image_url','image_url':{'url':uri}}]),mid))
-    r,e = request(setup,FaultBackend(simple_mode='error',legacy_mode='raw',raw={'data':raw_rows(s)}))
+    db.close()  # Finish fixture WAL checkpoint before the guarded source snapshot.
+    r,e = request(setup,FaultBackend(simple_mode='after_seed_error',legacy_mode='raw',raw={'data':raw_rows(s)}))
     check_success(r,s)
     assert [x['id'] for x in r.json()['data']] == ids[:3]+ids[4:]
     assert e[0]['stages'][-1]['media_filtered']
@@ -178,8 +180,8 @@ def test_add_failure_cannot_fake_success(setup):
     assert r.status_code==500 and 'MUST_NOT_LEAK' not in r.text
 
 
-@pytest.mark.parametrize('backend',[FaultBackend(),FaultBackend(simple_mode='error'),
-    FaultBackend(simple_mode='error',legacy_mode='error')])
+@pytest.mark.parametrize('backend',[FaultBackend(),FaultBackend(simple_mode='after_seed_error'),
+    FaultBackend(simple_mode='after_seed_error',legacy_mode='error')])
 def test_actual_twenty_item_ceiling_each_path(setup,backend):
     s,add=setup
     with TestClient(build_app(settings=s,service=ProductionService(s,add_service=add))) as c:

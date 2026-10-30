@@ -236,7 +236,7 @@ class RouteAService:
             self.store.abandon_add(request.request_id, digest)
             raise
 
-    def search(self, request: SearchRequest, *, trace: dict[str, Any] | None = None) -> SearchResponse:
+    def search(self, request: SearchRequest, *, _seed_ranked: list[tuple[str,float]] | None = None, trace: dict[str, Any] | None = None) -> SearchResponse:
         """Return post-rerank evidence; optionally collect local-only retrieval diagnostics.
 
         ``trace`` is never part of the AML HTTP response. It exists so offline benchmark runners can
@@ -257,75 +257,80 @@ class RouteAService:
                 },
             })
         validate_parts(request.query, total_limit=MAX_SEARCH_IMAGE_BYTES)
-        views = self.store.views_for_user(request.user_id)
-        if not views:
+        if _seed_ranked is None:
+            views = self.store.views_for_user(request.user_id)
+            if not views:
+                if trace is not None:
+                    trace.update({
+                        "query_plan": {}, "query_texts": [], "query_image_count": 0,
+                        "coarse_candidates": [], "reranked_candidates": [],
+                        "returned_candidates": [],
+                        "summary": {
+                            "coarse_candidate_count": 0, "rerank_attempted_count": 0,
+                            "rerank_scored_count": 0, "returned_count": 0,
+                        },
+                    })
+                return SearchResponse(data=[])
+            question = plain_text(request.query)
+            query_images = image_urls(request.query)
+            options = request.options or []
+            plan = self.vlm.plan_query(question, options, query_images)
+    
+            query_texts = [question]
+            visual_description = _as_text(plan.get("visual_description"))
+            intent = _as_text(plan.get("intent"))
+            anchors = plan.get("text_anchors", [])
+            keywords = _as_text(plan.get("keywords"))
+            if intent:
+                query_texts.append(intent)
+            if visual_description:
+                query_texts.append(visual_description)
+            if isinstance(anchors, list):
+                query_texts.extend(str(anchor).strip() for anchor in anchors if str(anchor).strip())
+            if keywords:
+                query_texts.append(keywords)
+            if options:
+                query_texts.append("Possible answer concepts: " + " | ".join(options))
+            query_texts = list(dict.fromkeys(
+                chunk for text in query_texts if text for chunk in _chunk_text(text)
+            ))
+            if not query_texts:
+                query_texts = ["visual query"]
+    
             if trace is not None:
                 trace.update({
-                    "query_plan": {}, "query_texts": [], "query_image_count": 0,
-                    "coarse_candidates": [], "reranked_candidates": [],
-                    "returned_candidates": [],
-                    "summary": {
-                        "coarse_candidate_count": 0, "rerank_attempted_count": 0,
-                        "rerank_scored_count": 0, "returned_count": 0,
-                    },
+                    "query_plan": plan,
+                    "query_texts": query_texts,
+                    "query_image_count": len(query_images),
+                    "fusion_weights": {"coarse": 0.45, "reranker": 0.55},
+                    "neighbor_window": self.settings.neighbor_window,
+                    "assembly_strategy": (
+                        "base_first_neighbor_quota"
+                        if self.settings.base_first_quota > 0 else "block_oriented"
+                    ),
+                    "base_first_quota": self.settings.base_first_quota,
+                    "lexical_retriever": "bm25" if self.settings.use_bm25 else "token_overlap",
+                    "bm25": (
+                        {"k1": self.settings.bm25_k1, "b": self.settings.bm25_b}
+                        if self.settings.use_bm25 else None
+                    ),
                 })
-            return SearchResponse(data=[])
-        question = plain_text(request.query)
-        query_images = image_urls(request.query)
-        options = request.options or []
-        plan = self.vlm.plan_query(question, options, query_images)
-
-        query_texts = [question]
-        visual_description = _as_text(plan.get("visual_description"))
-        intent = _as_text(plan.get("intent"))
-        anchors = plan.get("text_anchors", [])
-        keywords = _as_text(plan.get("keywords"))
-        if intent:
-            query_texts.append(intent)
-        if visual_description:
-            query_texts.append(visual_description)
-        if isinstance(anchors, list):
-            query_texts.extend(str(anchor).strip() for anchor in anchors if str(anchor).strip())
-        if keywords:
-            query_texts.append(keywords)
-        if options:
-            query_texts.append("Possible answer concepts: " + " | ".join(options))
-        query_texts = list(dict.fromkeys(
-            chunk for text in query_texts if text for chunk in _chunk_text(text)
-        ))
-        if not query_texts:
-            query_texts = ["visual query"]
-
-        if trace is not None:
-            trace.update({
-                "query_plan": plan,
-                "query_texts": query_texts,
-                "query_image_count": len(query_images),
-                "fusion_weights": {"coarse": 0.45, "reranker": 0.55},
-                "neighbor_window": self.settings.neighbor_window,
-                "assembly_strategy": (
-                    "base_first_neighbor_quota"
-                    if self.settings.base_first_quota > 0 else "block_oriented"
-                ),
-                "base_first_quota": self.settings.base_first_quota,
-                "lexical_retriever": "bm25" if self.settings.use_bm25 else "token_overlap",
-                "bm25": (
-                    {"k1": self.settings.bm25_k1, "b": self.settings.bm25_b}
-                    if self.settings.use_bm25 else None
-                ),
-            })
-
-        query_vectors = self.embedder.encode(query_texts)
-        combined_query = "\n".join(query_texts)
-        ranked = hybrid_rank(
-            query_vectors,
-            combined_query,
-            views,
-            self.settings.retrieve_pool,
-            use_bm25=self.settings.use_bm25,
-            bm25_k1=self.settings.bm25_k1,
-            bm25_b=self.settings.bm25_b,
-        )
+    
+            query_vectors = self.embedder.encode(query_texts)
+            combined_query = "\n".join(query_texts)
+            ranked = hybrid_rank(
+                query_vectors,
+                combined_query,
+                views,
+                self.settings.retrieve_pool,
+                use_bm25=self.settings.use_bm25,
+                bm25_k1=self.settings.bm25_k1,
+                bm25_b=self.settings.bm25_b,
+            )
+        else:
+            ranked = list(_seed_ranked)
+            combined_query = ''
+            query_images = []
         memory_ids = [memory_id for memory_id, _ in ranked]
         memories = self.store.memories_by_ids(request.user_id, memory_ids)
         coarse_rank = {memory_id: index for index, memory_id in enumerate(memory_ids, 1)}

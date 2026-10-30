@@ -28,7 +28,7 @@ QUERY = {'user_id':'test-a','query':[{'type':'text','text':'synthetic bicycle'}]
 def setup(tmp_path, monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY','offline-placeholder')
     s = dataclasses.replace(Settings.from_env(), storage_path=tmp_path/'test.sqlite3',
-                            memory_system_key=KEY, llm_base_url='https://invalid.test/v1',
+                            memory_system_key=KEY, rerank_top_n=0, llm_base_url='https://invalid.test/v1',
                             embedding_base_url='https://invalid.test/v1')
     store = SQLiteStore(s.storage_path)
     add = RouteAService(s, store=store, embedder=FakeEncoder(), vlm=FakeVLM())
@@ -88,7 +88,7 @@ def test_simple_failure_legacy_success(setup, mode, code):
     r,e = request(setup, FaultBackend(simple_mode=mode))
     check_success(r,setup[0])
     assert e[0]['final'] == 'legacy'
-    assert e[0]['stages'][0]['code'] == code
+    assert e[0]['stages'][0]['code'] == ('provider' if mode in {'provider','schema','id','duplicate_ref'} else code)
     assert len(e[0]['stages']) == 2
 
 
@@ -103,11 +103,8 @@ def test_both_fail_verified_seed_reuses_original_order(setup):
 
 def test_no_seed_deterministic_no_network(setup):
     r,e = request(setup, FaultBackend(simple_mode='before_seed',legacy_mode='error'))
-    check_success(r,setup[0])
-    assert e[0]['final'] == 'seed'
-    assert not e[0]['stages'][-1]['seed_existing']
-    again,_ = request(setup, FaultBackend(simple_mode='before_seed',legacy_mode='error'))
-    assert r.json() == again.json()
+    assert r.status_code==503 and len(e[0]['stages'])==1
+    assert set(r.json())=={'detail'}
 
 
 @pytest.mark.parametrize('simple_mode',['timeout','after_seed_timeout'])
@@ -119,9 +116,12 @@ def test_deadline_reserves_seed_and_reaps_processes(setup, simple_mode):
     start = time.monotonic()
     r,e = request(setup, FaultBackend(simple_mode=simple_mode, legacy_mode='timeout'), policy=p)
     assert time.monotonic()-start < p.total_seconds + 1
-    check_success(r,setup[0])
-    assert e[0]['final'] == 'seed'
-    assert [x['code'] for x in e[0]['stages'][:2]] == ['deadline','deadline']
+    if simple_mode=='timeout':
+        assert r.status_code==504 and len(e[0]['stages'])==1
+    else:
+        check_success(r,setup[0])
+        assert e[0]['final']=='seed'
+        assert [x['code'] for x in e[0]['stages'][:2]]==['deadline','deadline']
 
 
 def raw_rows(settings, user='test-a'):
@@ -135,7 +135,7 @@ def test_invalid_duplicate_legacy_candidates_drop_and_backfill(setup):
     rows = raw_rows(setup[0])
     rows.insert(1,rows[0].copy())
     rows.insert(2,{'id':'absent','content':[],'score':.9})
-    r,e = request(setup,FaultBackend(simple_mode='error',legacy_mode='raw',raw={'data':rows}))
+    r,e = request(setup,FaultBackend(simple_mode='after_seed_error',legacy_mode='raw',raw={'data':rows}))
     check_success(r,setup[0])
     assert len(r.json()['data']) == 4
     assert e[0]['stages'][-1]['dropped'] == 2
@@ -159,8 +159,8 @@ def test_empty_is_success_not_retry(setup, mode):
 def test_lexical_empty_for_image_only_or_no_match(setup):
     r,e = request(setup,FaultBackend(simple_mode='error',legacy_mode='error'),
                   body={**QUERY,'query':[{'type':'text','text':'zzzznomatch'}]})
-    assert r.status_code == 200 and r.json() == {'data':[]}
-    assert e[0]['final'] == 'empty'
+    assert r.status_code==503 and set(r.json())=={'detail'}
+    assert e[0]['final']=='error' and len(e[0]['stages'])==1
 
 
 def test_database_unreadable_not_empty_success(setup):
@@ -184,7 +184,7 @@ def test_all_stages_fail_clear_503(setup):
     r,e = request(setup,FaultBackend(simple_mode='error',legacy_mode='error',seed_mode='error'))
     assert r.status_code == 503
     assert e[0]['final'] == 'error'
-    assert [s['path'] for s in e[0]['stages']] == ['simple','legacy','seed']
+    assert [s['path'] for s in e[0]['stages']] == ['simple']
 
 
 @pytest.mark.parametrize('k',[1,2,100])

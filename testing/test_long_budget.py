@@ -118,6 +118,9 @@ def test_exhausted_simple_and_legacy_leave_seed_reserve(setup,monkeypatch):
     class Runner:
         def run(self,stage,settings,req,policy,deadline,seed,publish):
             seen.append((stage,clock[0],deadline))
+            if stage=='simple':
+                from aml_api.postseed.seed_port import digest
+                publish({'request':digest(req.model_dump(mode='json')),'hits':[]})
             if stage!='seed':
                 clock[0]=deadline+policy.cleanup_seconds
                 return {'error':'provider'}

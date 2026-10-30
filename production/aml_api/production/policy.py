@@ -58,6 +58,10 @@ def classify(exc):
     from ..errors import Forbidden, Unauthorized, UpstreamUnavailable
     from ..postseed.contracts import Failure
     from ..postseed.seed_port import SeedError
+    import sys
+    module = sys.modules.get('aml_api.search_images')
+    if module is not None and isinstance(exc, module.ImageInputError):
+        return SearchFault(exc.code, terminal=True)
     if isinstance(exc, SearchFault):
         return exc
     if isinstance(exc, (Forbidden, Unauthorized)):
@@ -75,7 +79,7 @@ def classify(exc):
     if isinstance(exc, (Failure, SeedError)):
         code = getattr(exc, 'code', None)
         # SeedError.args are intentionally not emitted (third-party errors may be wrapped).
-        mapping = {'assessment_schema': 'schema', 'duplicate_fragment': 'candidate_id',
+        mapping = {'assessment_unavailable':'provider', 'assessment_schema': 'schema', 'duplicate_fragment': 'candidate_id',
                    'unknown_fragment': 'candidate_id', 'missing_fragment': 'candidate_id',
                    'ranking_contract': 'ranking', 'membership_changed': 'membership',
                    'serialization_content': 'response_validation', 'source_read': 'source_unavailable',

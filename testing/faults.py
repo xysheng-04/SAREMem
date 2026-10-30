@@ -74,6 +74,13 @@ class FaultBackend:
         from aml_api.production.process import execute
         from aml_api.production.policy import SearchFault
         mode = getattr(self, stage+'_mode')
+        if stage=='simple' and mode in {'raw','response_error'}:
+            from aml_api.production.validation import reader,original
+            from aml_api.postseed.seed_port import digest,content_digest
+            with reader(settings.storage_path) as db:
+                ids=[x['memory_id'] for x in db.execute('SELECT memory_id FROM memories WHERE user_id=? ORDER BY seq',(request.user_id,))]
+                publish({'request':digest(request.model_dump(mode='json')),'hits':[{'id':mid,'hash':content_digest(original(db,request.user_id,mid,policy.source_bytes)[0]),'score':1./(i+1)} for i,mid in enumerate(ids)]})
+
         if mode == 'timeout':
             time.sleep(30)
         if mode in {'error','before_seed'}:
@@ -112,6 +119,7 @@ class FaultBackend:
             rt.AssessmentProvider = assessment
             original = rt.run_search
             def search(*args):
+                if mode=='after_seed_error':raise SearchFault('provider')
                 from aml_api.postseed.contracts import Failure
                 if mode == 'sort':
                     raise Failure('ranking_contract','sort')

@@ -28,6 +28,10 @@ class Config(Strict):
     upstream: dict = Field(default_factory=dict)
     forced_payload: dict | None = None
     frozen_envelope: dict | None = None
+    continue_candidate_errors: bool = False
+    neighbor_mode: Literal['off','session'] = 'off'
+    reorder_mode: Literal['bounded','stable_groups'] = 'bounded'
+    assess_pool: int = Field(default=20,ge=1,le=80)
     max_move: int = Field(default=3, ge=0, le=3)
     max_fragments: int = Field(default=32, ge=1, le=32)
     input_bound: int = Field(default=128000, gt=0)

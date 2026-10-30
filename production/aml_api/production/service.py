@@ -2,7 +2,7 @@
 import threading
 import time
 
-from ..errors import Forbidden, ServiceError, UpstreamUnavailable
+from ..errors import BadRequest, Forbidden, ServiceError, UpstreamUnavailable
 from ..media import validate_parts, MAX_SEARCH_IMAGE_BYTES
 from ..schemas import SearchResponse
 from ..service import RouteAService
@@ -19,23 +19,28 @@ class ExistingStore(ReadOnlySQLiteStoreMixin, SQLiteStore):
 
 
 class ProductionService:
-    def __init__(self, settings, *, policy=None, runner=None, diagnostics=None, add_service=None):
+    def __init__(self, settings, *, policy=None, runner=None, diagnostics=None, add_service=None, add_runner=None):
         self.settings = settings
         self.policy = policy or Policy.from_env()
         self.runner = runner or StageRunner()
         self.diagnostics = diagnostics  # Callable exists only in the separate testing entrypoint.
         self.add_service = add_service
+        self.add_runner = add_runner  # Python-only injection for offline fault verification.
         self.slots = threading.BoundedSemaphore(self.policy.max_concurrent_searches)
 
     def add(self, request):
         if self.add_service is not None:
             return self.add_service.add(request)
-        service = RouteAService(self.settings, store=ExistingStore(self.settings.storage_path))
+        from .add_control import add
+        import sqlite3
+        if not self.slots.acquire(blocking=False):
+            raise CapacityExceeded('memory service busy',retry_after=1)
         try:
-            return service.add(request)
+            return add(self.settings, request, self.policy, runner=self.add_runner)
+        except sqlite3.Error:
+            raise UpstreamUnavailable('Add persistence temporarily unavailable') from None
         finally:
-            service.vlm.client.close()
-            service.embedder.client.close()
+            self.slots.release()
 
     def search(self, request):
         entered = request_started.get()
@@ -84,9 +89,15 @@ class ProductionService:
                     fault = classify(exc)
                     code, terminal = fault.code, fault.terminal
                     if terminal:
+                        if code == 'query_image_invalid':
+                            raise BadRequest('invalid query image') from None
                         if code == 'scope_denied':
                             raise Forbidden('memory scope validation failed') from None
                         raise ServiceError('internal memory service error') from None
+                    if seed is None:
+                        if code == 'deadline':
+                            raise SearchDeadlineExceeded('memory search deadline exceeded') from None
+                        raise UpstreamUnavailable('seed retrieval unavailable') from None
                 finally:
                     if events is not None:
                         events.append({'path':stage,'code':code, **stats,

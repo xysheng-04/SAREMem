@@ -10,6 +10,10 @@ class SearchDeadlineExceeded(UpstreamUnavailable):
     status_code = 504
 
 
+class AddDeadlineExceeded(UpstreamUnavailable):
+    status_code = 504
+
+
 REASONS = {
     400: 'invalid memory request; check content format and media limits',
     401: 'invalid Memory System Key',
@@ -25,7 +29,7 @@ REASONS = {
     500: 'internal memory service error',
     502: 'upstream service returned an invalid response; retry with backoff',
     503: 'memory service unavailable; retry with backoff',
-    504: 'memory search deadline exceeded; retry with backoff',
+    504: 'memory request deadline exceeded; retry with backoff',
     524: 'gateway request timed out; retry with backoff',
 }
 

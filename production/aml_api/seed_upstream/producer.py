@@ -30,7 +30,14 @@ def production_identity() -> str:
     files=list((api/'seed_upstream').glob('*.py'))+list((api/'seed_upstream').glob('*.json'))
     files += [api/name for name in ['providers.py','retrieval.py','media.py','schemas.py','config.py',
                                    'errors.py','captioning.py','audit.py','postseed/seed_port.py','postseed/__init__.py']]
-    return digest({'files':[(str(p.relative_to(api)),hashlib.sha256(p.read_bytes()).hexdigest()) for p in sorted(files)],
+    import sys
+    module = sys.modules.get('aml_api.search_images')
+    images = module.ACTIVE.get() if module is not None else None
+    visual = {}
+    if images is not None:
+        files.append(api/'search_images.py')
+        visual = {'search_image_policy':images.policy, 'pillow':importlib.metadata.version('Pillow')}
+    return digest({**visual, 'files':[(str(p.relative_to(api)),hashlib.sha256(p.read_bytes()).hexdigest()) for p in sorted(files)],
                    'versions':{n:importlib.metadata.version(n) for n in ['numpy','pydantic','openai','httpx']}})
 
 
