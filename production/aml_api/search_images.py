@@ -37,6 +37,8 @@ class Images:
             raise TimeoutError()
 
     def image(self, uri):
+        from .production.diagnostics import stage
+        stage("image_processing")
         self.check()
         if self.mode == 'off':
             return uri

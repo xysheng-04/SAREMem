@@ -41,6 +41,11 @@ def configured_settings():
         raise ValueError('invalid simple neighbor mode')
     if neighbor_mode == 'session' and not (Path(__file__).parent/'aml_api/simple/neighbor_fill.py').is_file():
         raise ValueError('neighbor fill module unavailable')
+    sufficiency_mode=os.environ.get('AML_SUFFICIENCY_MODE','off')
+    if sufficiency_mode not in {'off','on'}:raise ValueError('invalid sufficiency mode')
+    if sufficiency_mode=='on':
+        from aml_api.context_sufficiency import configuration
+        configuration()
     settings = Settings.from_env()
     if mode == 'legacy' and not 1 <= settings.retrieve_pool <= 80:
         raise ValueError('legacy seed pool must be within 1..80')

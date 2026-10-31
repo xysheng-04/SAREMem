@@ -2,7 +2,7 @@
 
 **Seed-Anchored Reranking and Expansion for Multimodal Agent Memory**
 
-SAREMem couples relevance-based reranking with context expansion around direct evidence. It stores text/image memories through **Add** and retrieves original evidence through **Search**. Agent Memory Leaderboard (AML) handles Answer and Eval.
+SAREMem couples relevance-based reranking with context expansion around direct evidence. It stores text/image memories through **Add** and retrieves original evidence through **Search**. An optional context-sufficiency gate checks the complete final evidence set before it is returned. Agent Memory Leaderboard (AML) handles Answer and Eval.
 
 Author: [Xinyu Sheng](https://github.com/xinyusheng-04) · [MIT License](LICENSE)
 
@@ -81,11 +81,14 @@ Add    → captions + textual views → embeddings → atomic persistence
 Search → up to 80 seed candidates → assess up to 40 candidates
        → rerank: direct / context / other → select within top-k and media limits
        → protect direct/context → expand around retained direct evidence
-       → deduplicate and return up to 20 original memories
+       → deduplicate and project up to 20 original memories
+       → optional sufficiency gate → original evidence or an empty result
 ```
 
 - **Reranking:** query-relative relevance labels create stable direct, context and other groups, preserving seed order within each group. This replaces the earlier rule that promoted a direct candidate across at most three adjacent unrelated candidates. The separate legacy numeric reranker stays disabled.
 - **Expansion:** protect selected direct/context evidence, then use retained direct memories as anchors for the preceding and following memory in the same user/session. Deduplication, remaining output slots and media limits constrain expansion; it makes no extra LLM or embedding calls.
+
+**Context sufficiency (optional):** after expansion and final response projection, a multimodal model assesses the entire evidence set together with the query. This is a set-level score rather than an average of per-memory relevance scores. See the configuration below.
 
 The core contribution is their coupling: the same labels control evidence priority, protection and context anchors. Neighbors may lie outside the initial seed set, but returned IDs/content always refer to original stored memories.
 
@@ -94,11 +97,30 @@ Candidate-local errors are skipped while the remaining assessment pool continues
 ## API and configuration
 
 - `GET /health` needs no authentication. `POST /add` and `POST /search` accept `X-Api-Key`, `Authorization: Token ...` or `Authorization: Bearer ...`.
-- Content uses ordered arrays of `text` and `image_url` parts; images are inline Base64 JPEG/PNG/WebP Data URIs. See [request/response schemas](production/aml_api/schemas.py).
+- Plain text content/query may be supplied as a string. Multimodal content uses ordered arrays of `text` and `image_url` parts; images are inline Base64 JPEG/PNG/WebP Data URIs. See [request/response schemas](production/aml_api/schemas.py).
 - Add acknowledges only after persistence and supports idempotent writes. Search returns `{"data":[...]}`, original memory ID/content, and at most `min(top_k, 20, configured limit)` records, scoped by `user_id`.
+- Search `created_at` is the earliest valid source-message `timestamp` from the Add request, formatted as UTC ISO 8601. Input timestamps are Unix milliseconds; zero is valid. If no reliable source timestamp is supplied, `created_at` is omitted (not `null`); it never falls back to ingestion time, message order, or dates inferred from content. This is message time, not necessarily event time. All retrieval and recovery paths use the same rule; legacy stored ingestion timestamps are ignored. The existing database schema is retained, with an internal empty string for missing time on new writes.
 - Defaults: legacy seed retrieval, `stable_groups`/40 assessments and session-neighbor expansion. See the [test](testing/config.env.example) and [production](production/config.env.example) templates for settings; `AML_SIMPLE_NEIGHBOR_MODE=off` disables expansion.
 - Add/Search images default to request-only resizing: edge ≤2048, pixels ≤2,097,152, preserved aspect ratio, no crop/enlargement. Stored originals stay intact. `AML_ADD_IMAGE_MODE=off` and `AML_SEARCH_IMAGE_MODE=off` disable their respective components.
 - Each Add/Search request has a maximum 1680-second application budget; provider read timeout is 300 seconds and connect/write/pool limits are 30 seconds, clipped to remaining time. Add computation is isolated; the parent atomically commits results. Capacity exhaustion returns 429 with Retry-After.
+
+### Optional context sufficiency
+
+The templates keep this component **off**. To enable it, add these lines to your private instance configuration:
+
+```text
+AML_SUFFICIENCY_MODE=on
+AML_SUFFICIENCY_THRESHOLD=0.20
+AML_SUFFICIENCY_MAX_SECONDS=90
+```
+
+The [component](production/aml_api/context_sufficiency/__init__.py) assesses the complete final evidence set after retrieval, reranking, expansion and response projection, including successful recovery paths. It uses **gpt-4o-mini** with the query and the original text/image evidence. The model returns integer points from 0 to 100 and a diagnostic reason; points are divided by 100 for a 0–1 score with 0.01 resolution. This is an ordinal assessment, not a calibrated probability. No citation field or citation requirement is used.
+
+A score **below 0.20** returns `{"data":[]}`; **0.20 or higher** preserves the original evidence. The reason does not override the score. Internal scores/reasons are not added to the HTTP response. Empty evidence skips the extra call. Each nonempty Search normally adds one LLM call; bounded protocol/transport retries can add calls. Invalid or unavailable assessments return 503, and timeouts return 504, rather than being treated as refusals or starting another retrieval.
+
+The 90-second stage reservation stays inside the existing 1680-second Search budget. Under the shipped policy this reduces the effective initial simple-stage cap from 1140 to 1065 seconds; Add is unaffected. Set `AML_SUFFICIENCY_MODE=off` to restore the original Search behavior and timing. For physical removal, disable it, remove the component directory and corresponding tests, and rebuild `MANIFEST.json`/`SHA256SUMS` using the packager before distribution.
+
+Returning empty evidence does not force the organizer's Answer to refuse. This repository implements Add/Search; local gate decisions are not official Answer or evaluation results.
 
 ## Production
 

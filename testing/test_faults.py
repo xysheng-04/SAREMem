@@ -13,6 +13,7 @@ from aml_api.config import Settings
 from aml_api.schemas import AddRequest
 from aml_api.service import RouteAService
 from aml_api.store import SQLiteStore
+from aml_api.source_time import source_created_at
 from aml_api.production.policy import Policy
 from aml_api.production.process import StageRunner
 from aml_api.production.service import ProductionService
@@ -65,7 +66,7 @@ def check_success(r, settings):
     rows = r.json()['data']
     assert len(rows) <= 20
     assert len({r['id'] for r in rows}) == len(rows)
-    assert all(set(row) == {'id','content','score','created_at'} for row in rows)
+    assert all(set(row) == {'id','content','score'} for row in rows)
     assert [x['score'] for x in rows] == sorted([x['score'] for x in rows],reverse=True)
     with sqlite3.connect(settings.storage_path) as db:
         for row in rows:
@@ -126,9 +127,9 @@ def test_deadline_reserves_seed_and_reaps_processes(setup, simple_mode):
 
 def raw_rows(settings, user='test-a'):
     with sqlite3.connect(settings.storage_path) as db:
-        return [{'id':mid,'content':json.loads(content),'score':1/(i+1),'created_at':created}
+        return [{'id':mid,'content':json.loads(content),'score':1/(i+1),'created_at':source_created_at(created)}
                 for i,(mid,content,created) in enumerate(db.execute(
-                    'SELECT memory_id,content_json,created_at FROM memories WHERE user_id=? ORDER BY seq',(user,)))]
+                    'SELECT memory_id,content_json,source_timestamp_ms FROM memories WHERE user_id=? ORDER BY seq',(user,)))]
 
 
 def test_invalid_duplicate_legacy_candidates_drop_and_backfill(setup):

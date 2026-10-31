@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from ..media import MAX_SEARCH_IMAGE_BYTES, response_image_bytes
 from ..schemas import SearchItem, SearchResponse
 from ..errors import BadRequest
+from ..source_time import source_created_at
 from ..postseed.seed_port import content_digest, digest
 from .policy import SearchFault
 
@@ -35,10 +36,10 @@ def original(db, user_id, mid, byte_limit):
         raise SearchFault('scope_denied', terminal=True)
     if row['n'] > byte_limit:
         return None
-    row = db.execute('SELECT content_json,created_at FROM memories WHERE user_id=? AND memory_id=?',
+    row = db.execute('SELECT content_json,source_timestamp_ms FROM memories WHERE user_id=? AND memory_id=?',
                      (user_id, mid)).fetchone()
     try:
-        return json.loads(row['content_json']), row['created_at']
+        return json.loads(row['content_json']), source_created_at(row['source_timestamp_ms'])
     except (ValueError, TypeError):
         raise SearchFault('source_integrity', terminal=True) from None
 
@@ -100,7 +101,7 @@ def finalize(settings, request, policy, value, path, stats):
                 raise SearchFault('ranking')
             previous = score
             try:
-                item = SearchItem.model_validate(row)
+                item = SearchItem.model_validate({**row, "created_at": created_at})
                 if not item.content or [p.model_dump(mode='json') for p in item.content] != content:
                     raise ValueError('content normalization')
                 size = response_image_bytes(item.content)

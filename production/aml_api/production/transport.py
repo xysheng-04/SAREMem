@@ -30,6 +30,8 @@ class DeadlineTransport(httpx.BaseTransport):
         self.delegate = delegate if delegate is not None else httpx.HTTPTransport(retries=0)
 
     def handle_request(self, request):
+        from .diagnostics import stage
+        stage("provider")
         # Recompute on every SDK send, including frozen SDK retries. Never let
         # a new send inherit a timeout larger than its stage's remaining time.
         clip_request_timeout(request, self.policy, self.deadline)
@@ -71,6 +73,8 @@ def bounded_search_client(client, policy, deadline):
     # underlying HTTPX client's public request-hook interface, without replacing it.
     client.timeout = network_timeout(policy, deadline)
     def clip(request):
+        from .diagnostics import stage
+        stage("provider")
         clip_request_timeout(request, policy, deadline)
         import sys
         module = sys.modules.get('aml_api.search_images')

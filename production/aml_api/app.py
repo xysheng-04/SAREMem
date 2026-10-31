@@ -25,6 +25,8 @@ def create_app(settings: Settings | None = None, service=None, *, production: bo
         app.add_middleware(SearchRequestClock, policy=getattr(service, 'policy', None))
 
     def authenticate(authorization: str | None, x_api_key: str | None) -> None:
+        from .production.diagnostics import stage
+        stage('authentication')
         expected = settings.memory_system_key
         if expected is None:
             return
@@ -41,6 +43,11 @@ def create_app(settings: Settings | None = None, service=None, *, production: bo
 
     @app.exception_handler(ServiceError)
     async def service_error_handler(_: Request, exc: ServiceError):
+        from .production.diagnostics import active, error
+        from .production.policy import classify
+        record = active.get()
+        if record is not None and record.get('code') == 'http_error':
+            error(classify(exc).code)
         from .production.http_errors import reason, retry_headers
         headers = retry_headers(exc) if production else (
             {"Retry-After": str(exc.retry_after)} if exc.retry_after is not None else None)
@@ -54,6 +61,9 @@ def create_app(settings: Settings | None = None, service=None, *, production: bo
     async def validation_error_handler(_: Request, exc: RequestValidationError):
         from .production.http_errors import validation_details
         errors = validation_details(exc.errors()) if production else jsonable_encoder(exc.errors())
+        if production:
+            from .production.diagnostics import validation_failure
+            validation_failure(errors)
         return JSONResponse(status_code=422, content={"detail": errors})
 
     if production:
@@ -74,6 +84,9 @@ def create_app(settings: Settings | None = None, service=None, *, production: bo
 
     @app.exception_handler(Exception)
     async def unhandled_error_handler(_: Request, __: Exception):
+        from .production.diagnostics import active, error
+        error('internal')
+        if active.get() is not None: active.get()['status_attempted'] = 500
         # Do not leak keys, provider payloads, Base64 images, or stack traces to AML.
         return JSONResponse(
             status_code=500,
@@ -91,7 +104,14 @@ def create_app(settings: Settings | None = None, service=None, *, production: bo
         x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
     ):
         authenticate(authorization, x_api_key)
-        result = service.add(body)
+        from .production.diagnostics import active, stage
+        import threading
+        record = active.get()
+        complete = threading.Event()
+        if record is not None: record['_completion'] = complete
+        try: result = service.add(body)
+        finally: complete.set()
+        stage('response_validation')
         if production:
             # A valid-looking 200 must never mis-echo a logical write's identity.
             response = AddResponse.model_validate(result)
@@ -108,6 +128,11 @@ def create_app(settings: Settings | None = None, service=None, *, production: bo
         x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
     ):
         authenticate(authorization, x_api_key)
-        return service.search(body)
+        from .production.diagnostics import active
+        import threading
+        record = active.get(); complete = threading.Event()
+        if record is not None: record['_completion'] = complete
+        try: return service.search(body)
+        finally: complete.set()
 
     return app

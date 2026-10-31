@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator, model_serializer
 
 NonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -28,10 +28,23 @@ class ImagePart(BaseModel):
 ContentPart = Annotated[Union[TextPart, ImagePart], Field(discriminator="type")]
 
 
+def normalize_content_input(value):
+    """Only string input gains a canonical text block; existing arrays are untouched."""
+    if isinstance(value, str):
+        return [{'type':'text', 'text':value}]
+    return value  # The existing list/part validators reject objects, null and scalars.
+
+
+ContentInput = Annotated[
+    list[ContentPart],
+    BeforeValidator(normalize_content_input, json_schema_input_type=Union[NonEmpty, list[ContentPart]]),
+]
+
+
 class AddMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: Literal["user", "assistant"]
-    content: list[ContentPart]
+    content: ContentInput
     timestamp: int | None = None
 
     @field_validator("content")
@@ -66,7 +79,7 @@ class AddResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    query: list[ContentPart]
+    query: ContentInput
     options: list[str] | None = None
     user_id: NonEmpty
     top_k: int = Field(ge=1, le=100)
@@ -84,6 +97,13 @@ class SearchItem(BaseModel):
     content: list[ContentPart]
     score: float | None = None
     created_at: str | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_unknown_source_time(self, handler):
+        value = handler(self)
+        if self.created_at is None:
+            value.pop("created_at", None)
+        return value
 
 
 class SearchResponse(BaseModel):

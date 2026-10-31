@@ -42,6 +42,8 @@ def worker(conn, images, deadline, mode, edge, pixels):
 
 
 def prepare(images):
+    from .production.diagnostics import stage
+    stage("image_processing")
     if not images:
         return images
     mode = os.environ.get('AML_ADD_IMAGE_MODE', 'auto')

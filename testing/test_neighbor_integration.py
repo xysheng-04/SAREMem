@@ -32,7 +32,7 @@ def test_live_core_adds_neighbors_without_model_calls():
  assert [x.score for x in out.response.data]==[1./i for i in range(1,21)]
  assert all(x.content[0].text==x.id for x in out.response.data)
  side={x['id']:x for x in out.sidecar['items']};assert side['before']['assessment'] is None and side['before']['assessment_status']=='not_assessed'
- assert set(out.response.model_dump())=={'data'} and all(set(x.model_dump())=={'id','content','score','created_at'} for x in out.response.data)
+ assert set(out.response.model_dump())=={'data'} and all(set(x.model_dump())=={'id','content','score'} for x in out.response.data)
 
 def test_off_exact_original_and_removed_component(tmp_path):
  a,_=run(enriched(),'off');assert [x.id for x in a.response.data]==[f'm{i}' for i in range(20)]

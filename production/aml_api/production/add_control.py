@@ -22,11 +22,13 @@ from ..schemas import AddResponse
 from ..service import RouteAService, _flatten_messages, _stable_id
 from ..store import SQLiteStore, payload_digest, canonical_json
 from .http_errors import CapacityExceeded, AddDeadlineExceeded
+from .diagnostics import active, stage, error, safe_failure
 from .request_clock import request_started, request_deadline, request_cancelled
 
 
 def check(deadline, cancelled=None):
     if time.monotonic() >= deadline or (cancelled is not None and cancelled.is_set()):
+        error('cancelled' if cancelled is not None and cancelled.is_set() else 'deadline')
         raise AddDeadlineExceeded('Add deadline exceeded')
 
 
@@ -63,6 +65,7 @@ def compute(settings, request, policy, deadline):
 def worker(sock, settings, request, policy, deadline, backend, owner_pid=None):
     from .process import quiet
     quiet()
+    active.set({"stage":"compute_process"})
     done = threading.Event()
     owner_pid = owner_pid or os.getppid()
     def supervise_parent():
@@ -89,7 +92,7 @@ def worker(sock, settings, request, policy, deadline, backend, owner_pid=None):
         sock.sendall(data)
     except BaseException as exc:
         status = exc.status_code if isinstance(exc, ServiceError) else 503 if isinstance(exc, (MemoryError, TimeoutError)) else 500
-        try: sock.sendall(json.dumps({'error':status}).encode()+b'\n')
+        try: sock.sendall(json.dumps({'error':status, 'diagnostic':safe_failure(exc)}).encode()+b'\n')
         except BaseException: pass
     finally:
         done.set()
@@ -112,7 +115,9 @@ class ComputeRunner:
                 if not readable: continue
                 check(deadline,cancelled)
                 block = parent.recv(65536)
-                if not block: raise UpstreamUnavailable('Add computation unavailable')
+                if not block:
+                    error('worker_exit')
+                    raise UpstreamUnavailable('Add computation unavailable')
                 buffer.extend(block)
                 if len(buffer) > policy.max_wire_bytes: raise UpstreamUnavailable('Add computation capacity exceeded')
                 while b'\n' in buffer:
@@ -121,6 +126,8 @@ class ComputeRunner:
                     if message.get('ready') is True: group = True; continue
                     check(deadline, cancelled)
                     if 'error' in message:
+                        detail = message.get('diagnostic',{})
+                        stage(detail.get('stage')); error(detail.get('code'))
                         status = message['error']
                         if status == 400: raise BadRequest('invalid Add image or request')
                         if status == 504: raise AddDeadlineExceeded('Add deadline exceeded')
@@ -282,8 +289,10 @@ def add(settings, request, policy, runner=None):
     store = OwnedStore(settings, finish, cancelled)
     digest = payload_digest(request.model_dump(mode='json'))
     check(finish,cancelled)
+    stage('image_processing')
     total = sum(validate_parts(m.content,total_limit=MAX_ADD_IMAGE_BYTES) for m in request.messages)
     if total > MAX_ADD_IMAGE_BYTES: raise BadRequest('decoded images exceed the 30 MiB Add request limit')
+    stage('database_claim')
     cached = store.cached(request.request_id,digest)
     if cached is not None: return AddResponse.model_validate(cached)
     # Kernel ownership survives threads and excludes concurrent writes across service processes.
@@ -301,9 +310,11 @@ def add(settings, request, policy, runner=None):
         if cached is not None: return AddResponse.model_validate(cached)
         compute_end = finish-min(30.,policy.total_seconds*.15)
         check(compute_end,cancelled)
+        stage('compute_process')
         prepared = (runner or ComputeRunner()).run(settings,request,policy,compute_end,cancelled)
         memory,views,response = validate_prepared(prepared,request,digest)
         check(finish,cancelled)
+        stage('database_commit')
         store.complete_owned(memory,views,response.model_dump(mode='json'),digest)
         return response
     except BaseException as exc:

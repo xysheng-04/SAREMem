@@ -32,6 +32,9 @@ def execute(stage, settings, request, policy, deadline, checkpoint, publish, sta
     return _execute(stage, settings, request, policy, deadline, checkpoint, publish, stats)
 
 def _execute(stage, settings, request, policy, deadline, checkpoint, publish, stats):
+    if stage == 'sufficiency':
+        from ..context_sufficiency import execute as sufficiency
+        return sufficiency(settings,request,policy,deadline,checkpoint,stats)
     from .runtime import simple, legacy
     from .validation import seed_response
     if stage == 'simple':
@@ -46,6 +49,8 @@ def _execute(stage, settings, request, policy, deadline, checkpoint, publish, st
 
 def worker(sock, stage, settings, request, policy, deadline, checkpoint, backend):
     quiet()
+    from .diagnostics import active, safe_failure
+    active.set({"stage":stage})
     stats = {'phase': stage, 'candidate_count': None, 'dropped': 0,
              'media_filtered': False, 'seed_existing': False}
     def send(value):
@@ -67,7 +72,7 @@ def worker(sock, stage, settings, request, policy, deadline, checkpoint, backend
     except BaseException as exc:
         fault = classify(exc)
         try:
-            send({'error': fault.code, 'terminal': fault.terminal, 'stats': stats})
+            send({'error': fault.code, 'terminal': fault.terminal, 'stats': stats, 'diagnostic':safe_failure(exc)})
         except BaseException:
             # The parent may have closed the socket at its deadline. It observes EOF/timeout;
             # never let multiprocessing print an unsanitized child traceback on this path.

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from .source_time import source_created_at
 from typing import Any
 
 from .config import Settings
@@ -196,13 +196,11 @@ class RouteAService:
             vectors = self.embedder.encode([text for _, text in deduped])
 
             memory_id = _stable_id("mem", request.user_id, request.request_id)
-            timestamps = [message.timestamp for message in request.messages if message.timestamp is not None]
+            timestamps = [message.timestamp for message in request.messages
+                          if source_created_at(message.timestamp) is not None]
             source_timestamp_ms = min(timestamps) if timestamps else None
-            created_at = (
-                datetime.fromtimestamp(source_timestamp_ms / 1000, tz=timezone.utc)
-                if source_timestamp_ms is not None
-                else datetime.now(timezone.utc)
-            ).isoformat().replace("+00:00", "Z")
+            # Empty sentinel preserves the existing NOT NULL schema, never ingestion time.
+            created_at = source_created_at(source_timestamp_ms) or ""
             search_text = "\n".join(text for _, text in deduped)
             memory = {
                 "memory_id": memory_id,
@@ -491,7 +489,7 @@ class RouteAService:
             previous_reported_score = reported_score
             results.append(SearchItem(
                 id=memory["memory_id"], content=parts, score=reported_score,
-                created_at=memory["created_at"],
+                created_at=source_created_at(memory.get("source_timestamp_ms")),
             ))
             returned_trace.append({
                 "memory_id": memory["memory_id"],

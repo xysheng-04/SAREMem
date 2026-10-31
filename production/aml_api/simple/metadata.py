@@ -1,4 +1,5 @@
 from ..postseed.seed_port import digest
+from ..source_time import source_created_at
 from ..postseed.contracts import Failure
 
 def trusted_metadata(row):
@@ -8,7 +9,7 @@ def trusted_metadata(row):
     if seq is not None and (type(seq)is not int or seq<0):raise Failure('source_sequence','source')
     return {'source_timestamp_ms':timestamp,'source_timestamp_origin':'memory.source_timestamp_ms',
         'source_timestamp_semantics':'minimum_source_message_timestamp_ms_UTC_not_event_time',
-        'created_at':row.get('created_at'),'created_at_semantics':'stored_created_at_not_assumed_event_time',
+        'created_at':source_created_at(timestamp),'created_at_semantics':'minimum_source_message_timestamp_UTC_not_event_time',
         'session_digest':digest(session) if session is not None else None,'sequence':seq,
         'has_order':session is not None and seq is not None}
 

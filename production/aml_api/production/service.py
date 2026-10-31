@@ -1,4 +1,5 @@
 """Only this API adapter enables simple -> legacy -> seed recovery."""
+import os
 import threading
 import time
 
@@ -26,6 +27,12 @@ class ProductionService:
         self.diagnostics = diagnostics  # Callable exists only in the separate testing entrypoint.
         self.add_service = add_service
         self.add_runner = add_runner  # Python-only injection for offline fault verification.
+        mode=os.environ.get('AML_SUFFICIENCY_MODE','off')
+        if mode not in {'off','on'}:raise ValueError('invalid sufficiency mode')
+        self.sufficiency_config=None
+        if mode=='on':
+            from ..context_sufficiency import configuration
+            self.sufficiency_config=configuration()
         self.slots = threading.BoundedSemaphore(self.policy.max_concurrent_searches)
 
     def add(self, request):
@@ -46,6 +53,8 @@ class ProductionService:
         entered = request_started.get()
         started = entered if entered is not None else time.monotonic()
         # Validation and authorization failures are outside the fallback chain.
+        from .diagnostics import stage as diagnostic_stage
+        diagnostic_stage("image_processing")
         validate_parts(request.query, total_limit=MAX_SEARCH_IMAGE_BYTES)
         if not self.slots.acquire(blocking=False):
             raise CapacityExceeded('memory service busy', retry_after=1)
@@ -54,19 +63,22 @@ class ProductionService:
         seed = None
         p = self.policy
         end = started + p.total_seconds
+        retrieval_end=end-(self.sufficiency_config[1] if self.sufficiency_config else 0)
         def publish(value):
             nonlocal seed
             if seed is None:
                 seed = value
         try:
             for stage in ('simple', 'legacy', 'seed'):
+                from .diagnostics import stage as diagnostic_stage, error as diagnostic_error
+                diagnostic_stage(stage)
                 begin = time.monotonic()
                 if stage == 'simple':
-                    deadline = min(begin+p.simple_seconds, end-p.legacy_seconds-p.seed_reserve_seconds-3*p.cleanup_seconds)
+                    deadline = min(begin+p.simple_seconds, retrieval_end-p.legacy_seconds-p.seed_reserve_seconds-3*p.cleanup_seconds)
                 elif stage == 'legacy':
-                    deadline = min(begin+p.legacy_seconds, end-p.seed_reserve_seconds-2*p.cleanup_seconds)
+                    deadline = min(begin+p.legacy_seconds, retrieval_end-p.seed_reserve_seconds-2*p.cleanup_seconds)
                 else:
-                    deadline = end-p.cleanup_seconds
+                    deadline = retrieval_end-p.cleanup_seconds
                 stats = {'phase':stage, 'candidate_count':None, 'dropped':0,
                          'media_filtered':False, 'seed_existing':seed is not None}
                 code = 'ok'
@@ -77,17 +89,24 @@ class ProductionService:
                     result = self.runner.run(stage, self.settings, request, p, deadline, seed, publish)
                     stats.update(result.get('stats', {}))
                     if 'error' in result:
+                        detail = result.get('diagnostic',{})
+                        diagnostic_stage(detail.get('stage')); diagnostic_error(detail.get('code'))
                         raise SearchFault(result['error'], terminal=result.get('terminal', False))
                     # Response construction is still within this stage's recoverable boundary.
+                    diagnostic_stage('response_validation')
                     response = SearchResponse.model_validate(result['response'])
                     response.model_dump_json()
                     if time.monotonic() > end:
                         raise SearchFault('deadline')
+                    from .diagnostics import active
+                    if active.get() is not None: active.get()['code'] = 'http_error'
                     final = stage if response.data else 'empty'
-                    return response
+                    break
                 except Exception as exc:
                     fault = classify(exc)
                     code, terminal = fault.code, fault.terminal
+                    from .diagnostics import active
+                    if active.get() is not None and active.get().get("code") == "http_error": diagnostic_error(code)
                     if terminal:
                         if code == 'query_image_invalid':
                             raise BadRequest('invalid query image') from None
@@ -103,11 +122,44 @@ class ProductionService:
                         events.append({'path':stage,'code':code, **stats,
                                        'elapsed_ms':round((time.monotonic()-begin)*1000,3),
                                        'deadline_exhausted':code=='deadline'})
+            if final != 'error':
+                return self._sufficiency(request,response,p,end,events)
             if code == 'deadline' or time.monotonic() >= end:
                 raise SearchDeadlineExceeded('memory search deadline exceeded')
             raise UpstreamUnavailable('memory search unavailable')
         finally:
             self.slots.release()
             if events is not None:
-                self.diagnostics({'final':final, 'stages':events,
-                                  'elapsed_ms':round((time.monotonic()-started)*1000,3)})
+                try:
+                    self.diagnostics({'final':final, 'stages':events,
+                                      'elapsed_ms':round((time.monotonic()-started)*1000,3)})
+                except Exception: pass
+
+
+    def _sufficiency(self,request,response,p,end,events):
+        if self.sufficiency_config is None or not response.data:return response
+        from .diagnostics import stage as diagnostic_stage
+        diagnostic_stage('sufficiency')
+        begin=time.monotonic();deadline=min(begin+self.sufficiency_config[1],end-p.cleanup_seconds)
+        code='ok'
+        try:
+            if deadline<=begin:raise SearchDeadlineExceeded('memory search deadline exceeded')
+            result=self.runner.run('sufficiency',self.settings,request,p,deadline,response.model_dump(mode='json'),lambda _:None)
+            if 'error' in result:
+                fault=result['error'];code=fault
+                if fault in {'deadline','retry_budget'}:raise SearchDeadlineExceeded('memory search deadline exceeded')
+                raise UpstreamUnavailable('context sufficiency unavailable')
+            value=SearchResponse.model_validate(result['response'])
+            # Only an unchanged pass-through or empty evidence is permitted.
+            if value.data and value.model_dump(mode='json')!=response.model_dump(mode='json'):
+                raise UpstreamUnavailable('context sufficiency unavailable')
+            if time.monotonic()>deadline:raise SearchDeadlineExceeded('memory search deadline exceeded')
+            return value
+        except ServiceError:
+            raise
+        except Exception as exc:
+            fault=classify(exc);code=fault.code
+            if code in {'deadline','retry_budget'}:raise SearchDeadlineExceeded('memory search deadline exceeded') from None
+            raise UpstreamUnavailable('context sufficiency unavailable') from None
+        finally:
+            if events is not None:events.append({'path':'sufficiency','code':code,'elapsed_ms':round((time.monotonic()-begin)*1000,3)})
