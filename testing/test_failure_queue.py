@@ -41,7 +41,7 @@ def test_admits_platform_concurrency_without_busy(paths):
         clock=SearchRequestClock(app,policy());clock.sink=Sink()
         output=await asyncio.gather(*(call(clock,p) for p in paths))
         assert all(v[0]['status']==200 for v in output)
-        assert peak==1 and clock.inflight==0 and not clock.execution.locked()
+        assert peak==len(set(paths)) and clock.inflight==0 and not clock.execution.locked()
         assert max(ends)-min(ends)<.05 and not clock.sink.records
     asyncio.run(run())
 

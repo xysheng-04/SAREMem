@@ -34,20 +34,23 @@ class ProductionService:
             from ..context_sufficiency import configuration
             self.sufficiency_config=configuration()
         self.slots = threading.BoundedSemaphore(self.policy.max_concurrent_searches)
+        add_capacity = int(os.environ.get('AML_PROD_MAX_CONCURRENT_ADDS', '1'))
+        if not 1 <= add_capacity <= 32: raise ValueError('invalid Add capacity')
+        self.add_slots = threading.BoundedSemaphore(add_capacity)
 
     def add(self, request):
         if self.add_service is not None:
             return self.add_service.add(request)
         from .add_control import add
         import sqlite3
-        if not self.slots.acquire(blocking=False):
+        if not self.add_slots.acquire(blocking=False):
             raise CapacityExceeded('memory service busy',retry_after=1)
         try:
             return add(self.settings, request, self.policy, runner=self.add_runner)
         except sqlite3.Error:
             raise UpstreamUnavailable('Add persistence temporarily unavailable') from None
         finally:
-            self.slots.release()
+            self.add_slots.release()
 
     def search(self, request):
         entered = request_started.get()
@@ -138,28 +141,52 @@ class ProductionService:
 
     def _sufficiency(self,request,response,p,end,events):
         if self.sufficiency_config is None or not response.data:return response
+        import copy
         from .diagnostics import stage as diagnostic_stage
+        from .sufficiency_fallback import recover, unavailable
+        from .validation import finalize
         diagnostic_stage('sufficiency')
-        begin=time.monotonic();deadline=min(begin+self.sufficiency_config[1],end-p.cleanup_seconds)
-        code='ok'
-        try:
-            if deadline<=begin:raise SearchDeadlineExceeded('memory search deadline exceeded')
-            result=self.runner.run('sufficiency',self.settings,request,p,deadline,response.model_dump(mode='json'),lambda _:None)
+        begin=time.monotonic()
+        deadline=min(begin+self.sufficiency_config[1],end-p.cleanup_seconds)
+        snapshot=response.model_dump(mode='json')
+        def attempt():
+            diagnostic_stage('sufficiency')
+            try:
+                result=self.runner.run('sufficiency',self.settings,request,p,deadline,
+                                       copy.deepcopy(snapshot),lambda _:None)
+            except ServiceError:
+                raise
+            except Exception as exc:
+                fault=classify(exc)
+                if fault.code in {'deadline','retry_budget'}:
+                    raise SearchDeadlineExceeded('memory search deadline exceeded') from None
+                raise unavailable(fault.code,fault.terminal) from None
             if 'error' in result:
-                fault=result['error'];code=fault
-                if fault in {'deadline','retry_budget'}:raise SearchDeadlineExceeded('memory search deadline exceeded')
-                raise UpstreamUnavailable('context sufficiency unavailable')
-            value=SearchResponse.model_validate(result['response'])
-            # Only an unchanged pass-through or empty evidence is permitted.
-            if value.data and value.model_dump(mode='json')!=response.model_dump(mode='json'):
-                raise UpstreamUnavailable('context sufficiency unavailable')
-            if time.monotonic()>deadline:raise SearchDeadlineExceeded('memory search deadline exceeded')
+                fault=result['error']
+                if fault in {'deadline','retry_budget'}:
+                    raise SearchDeadlineExceeded('memory search deadline exceeded')
+                raise unavailable(fault,result.get('terminal',False))
+            # Malformed or mutated evidence is never a retry/fallback permission.
+            try:
+                value=SearchResponse.model_validate(result['response'])
+                if value.data and value.model_dump(mode='json')!=snapshot:
+                    raise ValueError('sufficiency evidence changed')
+                return value
+            except Exception:
+                raise UpstreamUnavailable('context sufficiency unavailable') from None
+        def validate_original():
+            try:
+                value=finalize(self.settings,request,p,copy.deepcopy(snapshot),'simple',{})
+                if value!=snapshot:raise ValueError('evidence changed before fallback')
+                return SearchResponse.model_validate(value)
+            except Exception:
+                raise UpstreamUnavailable('context sufficiency unavailable') from None
+        code='error'
+        try:
+            value=recover(attempt,validate_original,deadline,len(response.data))
+            code='ok'
             return value
-        except ServiceError:
-            raise
-        except Exception as exc:
-            fault=classify(exc);code=fault.code
-            if code in {'deadline','retry_budget'}:raise SearchDeadlineExceeded('memory search deadline exceeded') from None
-            raise UpstreamUnavailable('context sufficiency unavailable') from None
         finally:
-            if events is not None:events.append({'path':'sufficiency','code':code,'elapsed_ms':round((time.monotonic()-begin)*1000,3)})
+            if events is not None:
+                events.append({'path':'sufficiency','code':code,
+                               'elapsed_ms':round((time.monotonic()-begin)*1000,3)})

@@ -23,14 +23,25 @@ class SearchRequestClock:
         from pathlib import Path
         self.capacity = int(os.environ.get('AML_PROD_MAX_INFLIGHT', '32'))
         if not 1 <= self.capacity <= 32: raise ValueError('invalid admission capacity')
-        # One executing request keeps existing database fencing and source generation stable.
-        self.execution = asyncio.Lock()
+        self.executions = {}
+        self.queues = {}
+        for operation, key in [('add','AML_PROD_MAX_CONCURRENT_ADDS'), ('search','AML_PROD_MAX_CONCURRENT_SEARCHES')]:
+            count = int(os.environ.get(key, '1'))
+            if not 1 <= count <= 32: raise ValueError('invalid execution capacity')
+            self.executions[operation] = asyncio.Semaphore(count)
+            self.queues[operation] = deque()
+        self.execution = self.executions['add']  # Compatibility for default serial diagnostics.
         self.inflight = 0
         self.waiters = deque()
         directory = Path(__file__).resolve().parents[3]/'private/diagnostics'
+        try: self.source_identity = json.loads((Path(__file__).resolve().parents[3]/'MANIFEST.json').read_text())['identity']
+        except Exception: self.source_identity = 'unknown'
+        self.sufficiency_sink = None
         self.sink = None
         if os.environ.get('AML_FAILURE_DIAGNOSTICS','on') != 'off':
-            try: self.sink = FailureSink(directory)
+            try:
+                self.sink = FailureSink(directory)
+                self.sufficiency_sink = FailureSink(directory, filename="sufficiency.jsonl")
             except Exception: pass
 
     async def __call__(self, scope, receive, send):
@@ -51,6 +62,8 @@ class SearchRequestClock:
             headers_sent = False
             admitted = False
             executing = False
+            execution = self.executions[scope['path'].strip('/')]
+            waiters = self.queues[scope['path'].strip('/')]
             body_done = asyncio.Event()
             receiving = asyncio.Lock()
             async def receive_bounded():
@@ -98,16 +111,16 @@ class SearchRequestClock:
                 self.inflight += 1; admitted = True
                 stage('queue')
                 queued = time.monotonic()
-                ticket = object(); self.waiters.append(ticket)
+                ticket = object(); waiters.append(ticket)
                 # Poll peer only while queued, without consuming a potentially large body.
                 transport_obj = getattr(transport, 'transport', transport)
-                while self.execution.locked() or self.waiters[0] is not ticket:
+                while execution.locked() or waiters[0] is not ticket:
                     if transport_obj is not None and hasattr(transport_obj,'is_closing') and transport_obj.is_closing():
                         cancelled.set(); error('cancelled'); return
                     if time.monotonic() >= end: raise asyncio.TimeoutError()
                     await asyncio.sleep(min(.02,max(0,end-time.monotonic())))
-                await self.execution.acquire(); executing = True
-                self.waiters.popleft()
+                await execution.acquire(); executing = True
+                waiters.popleft()
                 record['queue_ms'] = round((time.monotonic()-queued)*1000,3)
                 stage('parse_validation')
                 await asyncio.wait_for(self.app(scope,receive_bounded,send_bounded),
@@ -136,7 +149,7 @@ class SearchRequestClock:
                 error('send_failed' if headers_sent else 'internal')
                 raise
             finally:
-                if admitted and not executing: self.waiters.remove(ticket)
+                if admitted and not executing: waiters.remove(ticket)
                 if record['stage'] == 'queue' and admitted: record['queue_ms'] = round((time.monotonic()-queued)*1000,3)
                 if cancelled.is_set() and record['code'] == 'http_error': error('cancelled')
                 if executing:
@@ -147,15 +160,22 @@ class SearchRequestClock:
                     if completion is not None and not completion.is_set():
                         async def release_after():
                             while not completion.is_set(): await asyncio.sleep(.02)
-                            self.execution.release()
+                            execution.release()
                             self.inflight -= 1
                         asyncio.create_task(release_after())
                         admitted = False
-                    else: self.execution.release()
+                    else: execution.release()
                 if admitted: self.inflight -= 1
                 if self.sink is not None and (record['status_attempted'] is None or record['status_attempted'] >= 400 or cancelled.is_set() or not record['response_completed'] or record['code'] in {'send_failed','deadline','cancelled'}):
                     record['elapsed_ms'] = round((time.monotonic()-start)*1000,3)
                     try: self.sink.emit(record)
+                    except Exception: pass
+                if self.sufficiency_sink is not None and record.get('sufficiency_attempts',0):
+                    from datetime import datetime, timezone
+                    record['utc'] = datetime.now(timezone.utc).isoformat()
+                    record['source_identity'] = self.source_identity
+                    record['elapsed_ms'] = round((time.monotonic()-start)*1000,3)
+                    try: self.sufficiency_sink.emit(record)
                     except Exception: pass
                 active.reset(diagnostic_token)
                 watcher.cancel()

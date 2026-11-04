@@ -65,7 +65,7 @@ def test_gate_error_never_fallback(kind,exception,monkeypatch,tmp_path):
  svc=ProductionService(dataclasses.replace(Settings.from_env(),storage_path=tmp_path/'unused.sqlite3'),runner=Runner(kind))
  req=SearchRequest.model_validate({'user_id':'u','top_k':20,'query':[{'type':'text','text':'Q'}]})
  with pytest.raises(exception):svc.search(req)
- assert svc.runner.calls==['simple','sufficiency']
+ assert svc.runner.calls==['simple']+['sufficiency']*(3 if kind=='error' else 1)
  assert svc.slots.acquire(blocking=False);svc.slots.release()
 
 class ScoreProvider:

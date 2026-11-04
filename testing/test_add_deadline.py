@@ -198,7 +198,7 @@ def test_lost_success_after_commit_recovers_cache(data,monkeypatch):
 
 def test_capacity_and_duplicate_processing(data):
     settings,request,policy=data
-    name='.add-'+hashlib.sha256(str(settings.storage_path.resolve()).encode()).hexdigest()[:16]+'.lock'
+    name='.add-'+hashlib.sha256((str(settings.storage_path.resolve())+'\x1f'+request.request_id).encode()).hexdigest()+'.lock'
     with (settings.storage_path.parent/name).open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         with pytest.raises(CapacityExceeded):add(settings,request,policy,ComputeRunner(sleeping))

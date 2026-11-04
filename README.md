@@ -116,7 +116,7 @@ AML_SUFFICIENCY_MAX_SECONDS=90
 
 The [component](production/aml_api/context_sufficiency/__init__.py) assesses the complete final evidence set after retrieval, reranking, expansion and response projection, including successful recovery paths. It uses **gpt-4o-mini** with the query and the original text/image evidence. The model returns integer points from 0 to 100 and a diagnostic reason; points are divided by 100 for a 0–1 score with 0.01 resolution. This is an ordinal assessment, not a calibrated probability. No citation field or citation requirement is used.
 
-A score **below 0.20** returns `{"data":[]}`; **0.20 or higher** preserves the original evidence. The reason does not override the score. Internal scores/reasons are not added to the HTTP response. Empty evidence skips the extra call. Each nonempty Search normally adds one LLM call; bounded protocol/transport retries can add calls. Invalid or unavailable assessments return 503, and timeouts return 504, rather than being treated as refusals or starting another retrieval.
+A score **below 0.20** returns `{"data":[]}`; **0.20 or higher** preserves the original evidence. The reason does not override the score. Internal scores/reasons are not added to the HTTP response. Empty evidence skips the extra call. Each nonempty Search normally adds one LLM call; bounded protocol/transport retries can add calls. Eligible failures that map to service HTTP 503 allow up to three sufficiency computations within the shared deadline; after three consecutive failures, the original revalidated evidence is returned (see Sufficiency recovery below). Other failures retain their error responses, and timeouts return 504. Errors are not treated as low-score refusals and do not start another retrieval.
 
 The 90-second stage reservation stays inside the existing 1680-second Search budget. Under the shipped policy this reduces the effective initial simple-stage cap from 1140 to 1065 seconds; Add is unaffected. Set `AML_SUFFICIENCY_MODE=off` to restore the original Search behavior and timing. For physical removal, disable it, remove the component directory and corresponding tests, and rebuild `MANIFEST.json`/`SHA256SUMS` using the packager before distribution.
 
@@ -136,8 +136,27 @@ test -e state/production/memory.sqlite3 || \
 .venv-prod/bin/python -B production/server.py --config config/production.env
 ```
 
-The template listens on `127.0.0.1:8000`; check `/health` from another terminal. Use a supervisor for persistent hosting and configure public routing/TLS and gateway timeouts for deployment. Production emits no per-request diagnostics; startup makes no model calls. Keep real keys, databases and test outputs out of Git.
+The template listens on `127.0.0.1:8000`; check `/health` from another terminal. Use a supervisor for persistent hosting and configure public routing/TLS and gateway timeouts for deployment. Production HTTP responses do not expose internal diagnostics. With diagnostics enabled, the server keeps private failure and sufficiency audit logs without full request/response contents; startup makes no model calls. Keep real keys, databases and test outputs out of Git.
 
 For official evaluation, register endpoints, capacity and a fixed commit under the [AML instructions](https://agentmemoryleaderboard.ai/api-guide). Local smoke is separate from organizer-run evaluation; never index gold answers or clues. Connectivity tests do not establish full-scale capacity or general retrieval gains.
 
 Verify distributed files with `sha256sum -c SHA256SUMS` (`shasum -a 256 -c SHA256SUMS` on macOS).
+
+### Execution concurrency
+
+`AML_PROD_MAX_CONCURRENT_ADDS` and `AML_PROD_MAX_CONCURRENT_SEARCHES` independently bound active work; the templates use 16 and 8. Adjust concurrency according to server load. `AML_PROD_MAX_INFLIGHT` includes waiting requests. Add locks are per request ID, allowing different requests to compute concurrently while SQLite claim/commit transactions remain atomic. Same-ID payload conflicts and cached replay are unchanged. Concurrency needs sufficient memory and provider capacity; these limits do not guarantee throughput. With parallel Add, insertion sequence follows completion order, not source-message chronology; use reliable source timestamps where available. Keep Add and Search evaluation phases separate to avoid changing the indexed source during a Search.
+
+
+### Sufficiency recovery
+
+Within one Search request, three consecutive eligible sufficiency computation
+failures that map to service HTTP 503 return the already retrieved, revalidated
+evidence unchanged. This is a change to Search failure behavior. Successful
+low-score decisions still return empty evidence. Timeouts, cancellation, scope,
+source integrity and evidence-validation failures do not enable recovery.
+The three computations share the existing 90-second sufficiency budget and
+1,680-second total budget; each retains the existing finite transport/protocol
+retry policy (at most three sends per computation, nine overall, budget permitting).
+No retrieval, answer generation, ingestion, schema migration or counter across
+requests is added. Private `sufficiency.jsonl` audit records contain timestamps,
+correlation, attempt counts and outcomes, without request/response contents.

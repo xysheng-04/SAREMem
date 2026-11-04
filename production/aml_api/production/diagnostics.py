@@ -61,7 +61,9 @@ def safe_failure(exc):
     return {'stage':phase, 'code':code if code in CODES else 'internal'}
 
 class FailureSink:
-    def __init__(self, directory, *, maximum=1048576, backups=3):
+    def __init__(self, directory, *, maximum=1048576, backups=3, filename="failures.jsonl"):
+        if filename not in {"failures.jsonl", "sufficiency.jsonl"}: raise ValueError("invalid audit filename")
+        self.filename = filename
         self.directory = Path(directory)
         self.maximum, self.backups = maximum, backups
         self.items = queue.Queue(maxsize=128)
@@ -70,7 +72,7 @@ class FailureSink:
     def emit(self, record):
         try:
             # No arbitrary exception strings, IDs, headers or application fields.
-            keys = {'correlation','operation','status_attempted','response_started','response_completed','delivery','stage','code','elapsed_ms','queue_ms'}
+            keys = {'correlation','operation','status_attempted','response_started','response_completed','delivery','stage','code','elapsed_ms','queue_ms','utc','sufficiency_attempts','sufficiency_failures_503','sufficiency_fallback','sufficiency_outcome','evidence_count','source_identity'}
             value = {k:v for k,v in record.items() if k in keys}
             if 'validation_errors' in record:
                 issues, truncated = validation_fields(record['validation_errors'])
@@ -89,7 +91,7 @@ class FailureSink:
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.directory.is_symlink(): return
         os.chmod(self.directory,0o700)
-        path = self.directory/'failures.jsonl'
+        path = self.directory/self.filename
         if path.exists() and path.stat().st_size + len(raw) > self.maximum:
             for index in range(self.backups,0,-1):
                 source = path if index==1 else Path(str(path)+'.'+str(index-1))

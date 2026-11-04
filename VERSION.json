@@ -11,5 +11,7 @@
   "project": "SAREMem",
   "project_expansion": "Seed-Anchored Reranking and Expansion for Multimodal Agent Memory",
   "upstream_candidate_identity": "6452e15e5f39d7bf9975feb717be186bc11c8631dfa6338a5c1e103d9329828e",
-  "source_normalization": "two module docstrings only; executable AST unchanged"
+  "source_normalization": "two module docstrings only; executable AST unchanged",
+  "sufficiency_recovery": "request-local-three-eligible-503-revalidated-original-evidence-shared-90s-v1",
+  "failure_behavior_changed": true
 }

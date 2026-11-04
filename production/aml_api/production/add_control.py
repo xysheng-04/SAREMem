@@ -295,8 +295,8 @@ def add(settings, request, policy, runner=None):
     stage('database_claim')
     cached = store.cached(request.request_id,digest)
     if cached is not None: return AddResponse.model_validate(cached)
-    # Kernel ownership survives threads and excludes concurrent writes across service processes.
-    name = '.add-'+hashlib.sha256(str(settings.storage_path.resolve()).encode()).hexdigest()[:16]+'.lock'
+    # Kernel ownership excludes duplicate computations of the SAME request across processes.
+    name = '.add-'+hashlib.sha256((str(settings.storage_path.resolve())+'\x1f'+request.request_id).encode()).hexdigest()+'.lock'
     fd = os.open(settings.storage_path.parent/name, os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0), 0o600)
     locked = False
     try:
