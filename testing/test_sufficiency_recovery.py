@@ -63,7 +63,7 @@ def test_paths(setup,outcomes,expected,attempts,fallback):
     assert len(response.data)==expected
     if expected:assert response.model_dump(mode='json')==evidence
     assert runner.calls==['simple']+['sufficiency']*attempts
-    assert len(set(runner.deadlines))==1
+    assert runner.deadlines==sorted(runner.deadlines)
     assert record['sufficiency_fallback'] is fallback
     assert record['sufficiency_attempts']==attempts
     assert settings.storage_path.read_bytes()==before
@@ -185,3 +185,64 @@ def test_same_service_new_request_resets_count(setup):
     runner=Runner(['provider']*6,evidence);service=ProductionService(settings,runner=runner)
     for _ in range(2):assert service.search(request).model_dump(mode='json')==evidence
     assert runner.calls==['simple']+['sufficiency']*3+['simple']+['sufficiency']*3
+
+class FakeClock:
+    def __init__(self):self.now=100.0
+    def monotonic(self):return self.now
+
+@pytest.mark.parametrize('seconds_each',[40.0,60.0,89.0])
+def test_three_slow_503_get_full_attempt_budgets(setup,monkeypatch,seconds_each):
+    import aml_api.production.service as service_module
+    import aml_api.production.sufficiency_fallback as recovery_module
+    settings,request,evidence=setup;clock=FakeClock()
+    monkeypatch.setattr(service_module,'time',clock);monkeypatch.setattr(recovery_module,'time',clock)
+    runner=Runner(['provider']*3,evidence,lambda *_:setattr(clock,'now',clock.now+seconds_each))
+    service=ProductionService(settings,runner=runner)
+    response=service.search(request)
+    assert response.model_dump(mode='json')==evidence
+    assert runner.deadlines==[190.0,190.0+seconds_each,190.0+2*seconds_each]
+    assert clock.now==100.0+3*seconds_each
+
+def test_original_search_end_caps_recovery(setup,monkeypatch):
+    import aml_api.production.service as service_module
+    import aml_api.production.sufficiency_fallback as recovery_module
+    settings,request,evidence=setup;clock=FakeClock()
+    monkeypatch.setattr(service_module,'time',clock);monkeypatch.setattr(recovery_module,'time',clock)
+    runner=Runner(['provider']*3,evidence,lambda *_:setattr(clock,'now',clock.now+40.0))
+    service=ProductionService(settings,runner=runner)
+    response=__import__('aml_api.schemas',fromlist=['SearchResponse']).SearchResponse.model_validate(evidence)
+    with pytest.raises(SearchDeadlineExceeded):service._sufficiency(request,response,service.policy,160.0,None)
+    assert runner.deadlines==[155.0,155.0]
+
+def test_single_attempt_still_stops_at_90(setup,monkeypatch):
+    import aml_api.production.service as service_module
+    import aml_api.production.sufficiency_fallback as recovery_module
+    settings,request,evidence=setup;clock=FakeClock()
+    monkeypatch.setattr(service_module,'time',clock);monkeypatch.setattr(recovery_module,'time',clock)
+    runner=Runner(['provider']*3,evidence,lambda *_:setattr(clock,'now',clock.now+91.0))
+    record={};token=active.set(record)
+    try:
+        with pytest.raises(SearchDeadlineExceeded):ProductionService(settings,runner=runner).search(request)
+    finally:active.reset(token)
+    assert runner.deadlines==[190.0] and record['sufficiency_stop_reason']=='attempt_deadline'
+
+def test_recovery_total_270_is_not_extended(setup,monkeypatch):
+    import aml_api.production.service as service_module
+    import aml_api.production.sufficiency_fallback as recovery_module
+    settings,request,evidence=setup;clock=FakeClock()
+    monkeypatch.setattr(service_module,'time',clock);monkeypatch.setattr(recovery_module,'time',clock)
+    runner=Runner(['provider']*3,evidence,lambda *_:setattr(clock,'now',clock.now+89.0))
+    service=ProductionService(settings,runner=runner)
+    response=__import__('aml_api.schemas',fromlist=['SearchResponse']).SearchResponse.model_validate(evidence)
+    import aml_api.production.validation as validation
+    original=validation.finalize
+    def slow_validation(*args,**kwargs):
+        clock.now+=4.0
+        return original(*args,**kwargs)
+    monkeypatch.setattr(validation,'finalize',slow_validation)
+    record={};token=active.set(record)
+    try:
+        with pytest.raises(SearchDeadlineExceeded):service._sufficiency(request,response,service.policy,1780.0,None)
+    finally:active.reset(token)
+    assert runner.deadlines==[190.0,279.0,368.0]
+    assert record['sufficiency_fallback'] is False and record['sufficiency_stop_reason']=='recovery_deadline'

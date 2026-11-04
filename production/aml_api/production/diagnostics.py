@@ -72,7 +72,7 @@ class FailureSink:
     def emit(self, record):
         try:
             # No arbitrary exception strings, IDs, headers or application fields.
-            keys = {'correlation','operation','status_attempted','response_started','response_completed','delivery','stage','code','elapsed_ms','queue_ms','utc','sufficiency_attempts','sufficiency_failures_503','sufficiency_fallback','sufficiency_outcome','evidence_count','source_identity'}
+            keys = {'correlation','operation','status_attempted','response_started','response_completed','delivery','stage','code','elapsed_ms','queue_ms','utc','sufficiency_attempts','sufficiency_failures_503','sufficiency_fallback','sufficiency_outcome','evidence_count','source_identity','sufficiency_stop_reason'}
             value = {k:v for k,v in record.items() if k in keys}
             if 'validation_errors' in record:
                 issues, truncated = validation_fields(record['validation_errors'])

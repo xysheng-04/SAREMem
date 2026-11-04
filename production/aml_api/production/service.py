@@ -147,12 +147,12 @@ class ProductionService:
         from .validation import finalize
         diagnostic_stage('sufficiency')
         begin=time.monotonic()
-        deadline=min(begin+self.sufficiency_config[1],end-p.cleanup_seconds)
+        deadline=min(begin+270.0,end-p.cleanup_seconds)
         snapshot=response.model_dump(mode='json')
-        def attempt():
+        def attempt(attempt_deadline):
             diagnostic_stage('sufficiency')
             try:
-                result=self.runner.run('sufficiency',self.settings,request,p,deadline,
+                result=self.runner.run('sufficiency',self.settings,request,p,attempt_deadline,
                                        copy.deepcopy(snapshot),lambda _:None)
             except ServiceError:
                 raise
@@ -183,7 +183,8 @@ class ProductionService:
                 raise UpstreamUnavailable('context sufficiency unavailable') from None
         code='error'
         try:
-            value=recover(attempt,validate_original,deadline,len(response.data))
+            value=recover(attempt,validate_original,deadline,len(response.data),
+                          attempt_seconds=min(90.0,self.sufficiency_config[1]))
             code='ok'
             return value
         finally:

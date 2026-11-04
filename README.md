@@ -154,9 +154,12 @@ failures that map to service HTTP 503 return the already retrieved, revalidated
 evidence unchanged. This is a change to Search failure behavior. Successful
 low-score decisions still return empty evidence. Timeouts, cancellation, scope,
 source integrity and evidence-validation failures do not enable recovery.
-The three computations share the existing 90-second sufficiency budget and
-1,680-second total budget; each retains the existing finite transport/protocol
-retry policy (at most three sends per computation, nine overall, budget permitting).
+Each computation has at most 90 seconds. The three computations together have
+at most 270 seconds, capped by the remaining 1,680-second Search budget. The
+existing 90-second retrieval reservation and retrieval stage limits are unchanged;
+recovery uses available remaining time rather than reserving 270 seconds upfront.
+Each computation retains the existing finite transport/protocol retry policy
+(at most three sends per computation, nine overall, budget permitting).
 No retrieval, answer generation, ingestion, schema migration or counter across
 requests is added. Private `sufficiency.jsonl` audit records contain timestamps,
 correlation, attempt counts and outcomes, without request/response contents.
